@@ -12,7 +12,14 @@ import joblib
 import pandas as pd
 
 from pipeline.config import Config, load_config
-from pipeline.paths import ensure_data_dirs, features_dir, models_dir, predictions_dir
+from pipeline.lifecycle import StopFlag, install_stop_handlers, run_forever
+from pipeline.paths import (
+    atomic_path,
+    ensure_data_dirs,
+    features_dir,
+    models_dir,
+    predictions_dir,
+)
 
 FEATURE_COLUMNS = ["distance_km", "prep_minutes"]
 
@@ -99,29 +106,37 @@ def run_once(
 
     preds = score_frame(pending, bundle)
     out = predictions_dir(base) / f"predictions_{ckpt_path.stem}_{int(time.time())}.csv"
-    preds.to_csv(out, index=False)
+    with atomic_path(out) as tmp:
+        preds.to_csv(tmp, index=False)
     print(f"scored {len(preds)} orders with {ckpt_path.name} -> {out.name}")
     return out
 
 
-def run_loop(cfg: Config | None = None, base: Path | None = None) -> None:
+def run_loop(
+    cfg: Config | None = None,
+    base: Path | None = None,
+    stop: StopFlag | None = None,
+) -> None:
     cfg = cfg or load_config()
     ensure_data_dirs(base)
     print("DashBite inference started (independent read path)")
     warned = [False]
     loaded_name: str | None = None
-    while True:
+
+    def step() -> None:
+        nonlocal loaded_name
         ckpt = newest_checkpoint(base)
         if ckpt is not None and ckpt.name != loaded_name:
             print(f"using checkpoint {ckpt.name}")
             loaded_name = ckpt.name
             warned[0] = False
         run_once(cfg=cfg, base=base, _warned_no_ckpt=warned)
-        time.sleep(cfg.poll_interval_seconds)
+
+    run_forever("infer", step, cfg.poll_interval_seconds, stop=stop)
 
 
 def main() -> None:
-    run_loop()
+    run_loop(stop=install_stop_handlers())
 
 
 if __name__ == "__main__":

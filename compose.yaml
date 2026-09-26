@@ -1,0 +1,79 @@
+# DashBite pipeline: one image, five services, one named volume.
+# Usually driven through the Makefile: make docker-up / docker-ps / docker-down.
+name: dashbite
+
+x-pipeline: &pipeline
+  image: dashbite:local
+  build: .
+  environment:
+    DATA_ROOT: /data
+    TRAIN_EVERY_N_EVENTS: ${TRAIN_EVERY_N_EVENTS:-50}
+    BATCH_SIZE: ${BATCH_SIZE:-20}
+    POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-2.0}
+    CORRUPT_BATCH_RATE: ${CORRUPT_BATCH_RATE:-0.25}
+    RANDOM_SEED: ${RANDOM_SEED:-42}
+  volumes:
+    - dashbite-data:/data
+  restart: on-failure
+
+x-worker-health: &worker-health
+  interval: 10s
+  timeout: 5s
+  retries: 3
+  start_period: 20s
+
+services:
+  simulator:
+    <<: *pipeline
+    command: ["python", "-m", "pipeline.simulator"]
+    healthcheck:
+      <<: *worker-health
+      test: ["CMD", "python", "-m", "pipeline.healthcheck", "simulator"]
+
+  preprocess:
+    <<: *pipeline
+    command: ["python", "-m", "pipeline.preprocess"]
+    healthcheck:
+      <<: *worker-health
+      test: ["CMD", "python", "-m", "pipeline.healthcheck", "preprocess"]
+
+  train:
+    <<: *pipeline
+    command: ["python", "-m", "pipeline.train"]
+    healthcheck:
+      <<: *worker-health
+      test: ["CMD", "python", "-m", "pipeline.healthcheck", "train"]
+
+  infer:
+    <<: *pipeline
+    command: ["python", "-m", "pipeline.infer"]
+    healthcheck:
+      <<: *worker-health
+      test: ["CMD", "python", "-m", "pipeline.healthcheck", "infer"]
+
+  dashboard:
+    <<: *pipeline
+    # Command: the image default (Streamlit on 0.0.0.0:8501).
+    # Read-only: the dashboard never writes pipeline data.
+    volumes:
+      - dashbite-data:/data:ro
+    # Localhost only. Use "8501:8501" to show it to other machines on purpose.
+    ports:
+      - "127.0.0.1:8501:8501"
+    healthcheck:
+      test: ["CMD", "python", "-m", "pipeline.healthcheck", "dashboard"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  # One-off test run inside the image: make docker-test.
+  # No volume, so tests can never touch pipeline data.
+  tests:
+    image: dashbite:local
+    build: .
+    command: ["pytest", "-q", "-p", "no:cacheprovider"]
+    profiles: ["test"]
+
+volumes:
+  dashbite-data:

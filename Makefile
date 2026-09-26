@@ -15,13 +15,23 @@ export BATCH_SIZE              ?= 20
 export POLL_INTERVAL_SECONDS   ?= 2.0
 export CORRUPT_BATCH_RATE      ?= 0.25
 export PYTHONPATH              := $(CURDIR)
+# Flush print() output immediately, so .logs/*.log update live during make run
+export PYTHONUNBUFFERED        := 1
+
+# Host data directory used by clean-data (deliberately not exported).
+# Keep comments on their own lines: Make keeps spaces before a trailing '#'.
+DATA_ROOT ?= $(CURDIR)/data
+
+# Container runtime (Compose v2)
+COMPOSE ?= docker compose
 
 LOG_DIR := .logs
 PIDS    := $(LOG_DIR)/pids
 
 .PHONY: help install test test-unit test-regression test-integration \
 	simulator preprocess train infer dashboard \
-	run stop clean clean-data
+	run stop clean clean-data \
+	docker-build docker-up docker-ps docker-logs docker-down docker-clean docker-test
 
 help:
 	@echo "DashBite Make targets"
@@ -40,6 +50,15 @@ help:
 	@echo "  make stop                 Stop background pipeline processes"
 	@echo "  make clean-data           Remove runtime files under data/ (keep .gitkeep)"
 	@echo "  make clean                clean-data + logs + pytest cache"
+	@echo ""
+	@echo "Docker (no local Python needed):"
+	@echo "  make docker-build         Build the dashbite:local image"
+	@echo "  make docker-up            Start all five services (dashboard on localhost:8501)"
+	@echo "  make docker-ps            Show container status and health"
+	@echo "  make docker-logs          Follow logs (SERVICE=<name> for one service)"
+	@echo "  make docker-down          Stop and remove containers (keeps the data volume)"
+	@echo "  make docker-clean         docker-down + delete the data volume"
+	@echo "  make docker-test          Run the pytest suite inside the image"
 	@echo ""
 	@echo "Env defaults: TRAIN_EVERY_N_EVENTS=$(TRAIN_EVERY_N_EVENTS) BATCH_SIZE=$(BATCH_SIZE)"
 
@@ -108,14 +127,43 @@ stop:
 	@echo "Pipeline stopped."
 
 clean-data:
-	@rm -f data/raw/*.csv \
-		data/features/features_*.csv data/features/.done_* \
-		data/models/checkpoint_*.joblib data/models/metrics_*.json data/models/train_state.json \
-		data/predictions/predictions_*.csv \
-		data/quality/*.csv
+	@rm -f "$(DATA_ROOT)"/raw/*.csv \
+		"$(DATA_ROOT)"/features/features_*.csv "$(DATA_ROOT)"/features/.done_* \
+		"$(DATA_ROOT)"/models/checkpoint_*.joblib "$(DATA_ROOT)"/models/metrics_*.json "$(DATA_ROOT)"/models/train_state.json \
+		"$(DATA_ROOT)"/predictions/predictions_*.csv \
+		"$(DATA_ROOT)"/quality/*.csv \
+		"$(DATA_ROOT)"/raw/.*.tmp "$(DATA_ROOT)"/features/.*.tmp "$(DATA_ROOT)"/models/.*.tmp \
+		"$(DATA_ROOT)"/predictions/.*.tmp "$(DATA_ROOT)"/quality/.*.tmp
 	@echo "Runtime data cleared."
 
 clean: clean-data
 	@rm -rf $(LOG_DIR) .pytest_cache
 	@find . -type d -name __pycache__ -not -path './.venv/*' -exec rm -rf {} + 2>/dev/null || true
 	@echo "Clean complete."
+
+# --- Docker -------------------------------------------------------------------
+# None of these depend on install: a machine with only Docker can use them.
+
+docker-build:
+	$(COMPOSE) build
+
+docker-up:
+	$(COMPOSE) up -d --build
+	@echo "Dashboard: http://localhost:8501"
+	@echo "Status: make docker-ps    Logs: make docker-logs    Stop: make docker-down"
+
+docker-ps:
+	$(COMPOSE) ps
+
+docker-logs:
+	$(COMPOSE) logs -f --tail=50 $(SERVICE)
+
+docker-down:
+	$(COMPOSE) down
+
+docker-clean:
+	$(COMPOSE) down -v --remove-orphans
+
+docker-test:
+	$(COMPOSE) build tests
+	$(COMPOSE) run --rm tests

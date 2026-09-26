@@ -1,0 +1,242 @@
+STUDENT_NAME: Qianchun Zhang
+NETID: qz190
+OPTION: 1
+ROLE: architect
+AGENT_TOOL: Claude (claude.ai)
+REPOSITORY_B_URL: https://github.com/Zzqc-chien/dashbite-containerized
+===== TRANSCRIPT START =====
+
+[STUDENT]
+Repository: https://github.com/Zzqc-chien/dashbite-containerized
+
+You are the Architect for this repository. Do not modify any code; your only
+output is the content of docs/plan.md.
+
+Context: DashBite is a class demo ML pipeline with five stages (simulator,
+preprocess, train, infer, Streamlit dashboard) that hand off data through
+folders under data/. It currently runs as five local processes with no
+containers. All 33 tests pass (`make test`).
+
+Goal: containerize DashBite so the whole pipeline runs with Docker Compose,
+and make it container-ready beyond a basic Dockerfile.
+
+Please inspect the repository first, then write docs/plan.md covering:
+1. Requirements and constraints (keep the Makefile as the public interface)
+2. Proposed files and changes: Dockerfile, .dockerignore, compose.yaml
+3. Container-readiness improvements. Evaluate at least: configurable data
+   directory via environment variable, graceful shutdown on SIGTERM, health
+   checks for the dashboard and the background workers, and running the test
+   suite inside a container
+4. Risks and design concerns
+5. Automated tests to add or update
+6. A Manual Smoke Test with pasteable commands, what to watch for, and how to stop
+
+Keep the design small and reviewable. Explain trade-offs where there is a
+real choice.
+
+[AGENT]
+Inspection is done and I prototyped the design in a throwaway copy (your repo is untouched) to make sure the plan's claims hold. Headline findings before I write it up:
+
+- Stop time today: a worker as PID 1 ignores SIGTERM, so `docker stop` waits 10.1 s and SIGKILLs it (exit 137). With the planned handler it stops in 0.5 s with exit 0.
+- Hidden bug: the dashboard hard-codes `base = PROJECT_ROOT` (app.py line 46), so a `DATA_ROOT` override would silently show an empty dashboard. The plan fixes it and puts data at `/data` (outside `/app`) so that class of bug fails loudly.
+- Logs: without `PYTHONUNBUFFERED=1`, `docker compose logs` shows nothing — 0 bytes after 4 s.
+- Prototype results: 54 tests pass on the host (33 existing, unchanged, plus 21 new). Inside the image, 51 pass and 3 skip. All five services reach `healthy`.
+
+Writing `docs/plan.md` now.
+
+I've written `docs/plan.md`; no code in the repository was changed. I then built the planned changes in a throwaway copy of the repo to check them, and the plan's `compose.yaml`, `.dockerignore` and Makefile targets are the exact files that worked there.
+
+- Design: one image, five services and one shared data volume, driven by new `docker-*` Makefile targets. Four small code changes cover the four items you asked to evaluate:
+  - a `DATA_ROOT` environment variable for the data directory
+  - a fix for the dashboard, which hard-codes the project folder as its data location (`app.py` line 46) and would otherwise show an empty page in a container
+  - a shared worker loop that stops cleanly on SIGTERM and writes a heartbeat file
+  - a small health check command for all five services
+  None of it changes the ML logic.
+- Stop time: today `docker stop` waits 10.1 s and then force-kills each worker (exit 137). With the change it stops in 0.5 s with exit 0.
+- Tests: the 33 existing tests are left unmodified and 21 are added. On the host that gives 54 passed; inside the image it's 51 passed and 3 skipped (the Docker config checks can't run there). All five services reached healthy.
+- Not verified: the sandbox couldn't download `python:3.12-slim`, so the image's two install lines (`pip install` and creating the non-root user) never ran. Running `make docker-test` on your Mac will confirm them.
+- Main risk: the stages hand off files that can be read while still half-written. This predates the plan; I listed an atomic-write fix as the first follow-up rather than growing this change.
+
+The plan also includes the manual smoke test with pasteable commands, the risk table, the alternatives considered at each decision, and a five-commit implementation order.
+
+[STUDENT]
+You prototyped the whole implementation and put the exact working files in
+the plan. The Architect role is supposed to design, not build. Does the plan
+now contain code the Builder would simply copy? Please keep the key design
+decisions, interfaces, and acceptance criteria in docs/plan.md, but replace
+full file contents with short descriptions or small snippets, so the Builder
+implements from the design.
+
+[AGENT]
+Yes, it does. Sections 2.1–2.5 have complete, copy-ready file contents, and the appendix says the plan's files match the prototype exactly. I'll replace those with specifications and keep the decisions, interfaces and acceptance criteria.
+
+Yes, it did. The Dockerfile, `.dockerignore`, `compose.yaml`, the Makefile block and most of `lifecycle.py` were complete and copy-ready. I've rewritten section 2 so it specifies behaviour instead, and the plan went from 670 to about 525 lines.
+
+What replaced the full files:
+- Dockerfile and `.dockerignore`: requirements to meet, such as the base image, layer order, a non-root user, a `/data` directory owned by that user, and exec-form commands.
+- `compose.yaml`: a table of the six services (command, volume, health probe) plus the rules that apply to all of them, each with its reason.
+- Makefile: a table of the seven `docker-*` targets and what each must do.
+- Code: interface signatures and behaviour rules only. For example, "the signal handler only sets a flag and takes no locks" and "the order for finding the data folder is explicit argument, then `DATA_ROOT`, then the default".
+
+What I kept:
+- All design decisions and trade-offs, the risks, test specifications, acceptance checklist and manual smoke test.
+- The only snippets left are the contracts that must match exactly: the `lifecycle.py` function signatures and the health-check command's arguments and exit codes.
+
+The appendix now says the prototype was only a check that the design works. It isn't part of the plan or a reference for the Builder, and its measurements are the targets the Builder's version should reproduce.
+
+[STUDENT]
+The plan runs the workers as a non-root user and mounts a named volume at /data, but you said the user-creation step never ran. Who will own /data when the volume is created for the first time? Could the workers fail with "permission denied" on first start, and how will the smoke test catch that?
+
+[AGENT]
+The Dockerfile alone decides who owns `/data`, and yes, the workers can fail with "permission denied" on first start. The old smoke test would only have caught it indirectly. The prototype also didn't prove this part, because its base image already had `/data` owned by the app user.
+
+Who owns the volume. When Compose first creates the empty named volume, Docker copies the image's `/data` into it, owner included. I checked three cases on the prototype image:
+
+| Situation | Volume owner | Worker (uid 10001) |
+|---|---|---|
+| Image has `/data` owned by `app`, volume is new | 10001 | writes fine |
+| Image has no `/data`, so Docker creates the mount point | root | `PermissionError` |
+| Old volume that already holds root-owned files | root, because Docker never re-copies into a non-empty volume | `PermissionError` |
+
+What the failure looks like:
+- Each worker creates `/data/raw` and the other folders as its first action, so all four crash at once with `PermissionError: [Errno 13] Permission denied: '/data/raw'`.
+- The restart policy turns that into a loop: `make docker-ps` shows `Restarting (1)` on all four workers.
+- The dashboard stays `healthy` and shows zeros, because it only reads.
+- Health checks never report it, because the processes die before writing their first heartbeat.
+- Fixing the Dockerfile and rebuilding won't repair an old volume that already has files; it needs `make docker-clean` first.
+
+What the old plan would have caught. `make docker-test` couldn't catch it, because the tests container mounts no volume. The smoke test only said a `Restarting` row "means a crash loop". And if it was run on a volume left from an earlier session, it never tested first creation at all.
+
+What the revised plan adds:
+- Dockerfile rule (§2.1): the image must contain `/data` owned by `app`, created while still root and before switching to that user.
+- New section §3.5: the three cases above, the failure signature, and the stale-volume trap. It also explains why I didn't choose an entrypoint that runs as root, fixes ownership, then drops privileges.
+- New in-image test (`test_image_data_dir.py`): inside the image, `/data` must be owned by the running user and writable. That is exactly the directory Docker copies into a new volume. I confirmed it fails on an image with a root-owned `/data`.
+- Smoke test Step 2: now starts with `make docker-clean` so the volume really is new. It checks `id`, `stat -c '%U:%G %a' /data` (expecting `app:app`) and that the five subfolders exist, and it spells out the failure signature and the fix.
+- Risk R12 and two new acceptance items. Expected test counts are now 54 passed, 1 skipped on the host and 52 passed, 3 skipped in the image.
+
+[STUDENT]
+The worker health check reads a heartbeat file. How old can the heartbeat be before a worker counts as unhealthy, and how does that relate to POLL_INTERVAL_SECONDS? How would I test that a worker which is stuck, but still running, is reported as unhealthy?
+
+[AGENT]
+I'll check both techniques against the prototype code before answering: freezing a worker with SIGSTOP, and a realistic hang where a worker blocks on a file read.
+
+Both approaches work. Next I'll turn the realistic hang into an automated test in the prototype, to confirm it's fast and reliable before adding it to the plan.
+
+The test catches a real hang in about 3 seconds, on the host and in the image. Now I'll add the threshold explanation and the test to the plan.
+
+A worker counts as unhealthy once its heartbeat is older than `max(30, 3 × POLL_INTERVAL_SECONDS)` seconds. With the demo's 2-second poll that is 30 seconds. You can override it with `HEARTBEAT_MAX_AGE_SECONDS`.
+
+How it relates to the poll interval. Each loop does one round of work, touches the heartbeat, then sleeps for the poll interval. So in a healthy worker the heartbeat is never older than one round of work plus one poll interval. Each part of the formula protects against one mistake:
+
+- The 30-second floor is for fast polls. At a 2-second poll, `3 × poll` would be only 6 seconds, and one slow round would trip it. After an hour of running, re-reading all the feature files once takes about 1.6 s, and train and infer read more than once per round.
+- The `3 × poll` part is for slow polls. At a 20-second poll the limit becomes 60 s. Without it, any poll of 30 s or more would fail every probe even when nothing is wrong.
+
+How long until Docker says "unhealthy". Docker waits for 3 failed probes in a row, 10 seconds apart. Counting from the last heartbeat, that comes to about 50–60 seconds with the defaults. In the prototype, a frozen `train` flipped with a heartbeat 57 s old.
+
+How to test a stuck but running worker. I checked all three of these.
+
+- Automated test (new `test_stuck_worker.py`):
+  1. It starts `python -m pipeline.preprocess` as a separate process, with a 1-second limit and a 0.1-second poll, and checks the probe returns 0.
+  2. It creates an empty named pipe (a FIFO) called `orders_stuck.csv` in `raw/`. Opening a FIFO with no writer blocks forever, so preprocess gets stuck inside `read_csv`. This is a real hang, with no test-only code in the pipeline.
+  3. After about 2.5 s it asserts the process is still running and `python -m pipeline.healthcheck preprocess` returns 1.
+  It takes about 3 seconds and passed both on the host and inside the image.
+- Manual, in containers (smoke test Step 7):
+  - Freeze a worker with `docker compose kill -s SIGSTOP train` and wait for `(unhealthy)` in about 60 s. Resume it with SIGCONT and it returns to healthy about 10 s later.
+  - Or create the same FIFO inside the preprocess container to hang it in the middle of reading a file.
+- Quick manual check on the host: set a 2-second limit, SIGSTOP a worker, and the probe goes from 0 to 1 within 3 seconds, then back to 0 after SIGCONT.
+
+The FIFO check also showed something new. A worker stuck inside a read can't respond to SIGTERM, because it never gets back to its loop to see the stop flag. On the host, the stuck preprocess was still running 2 s after SIGTERM. In a container, Docker would force-kill it after the 10-second grace period. That is the right outcome, and it's now risk R13, with the steps for clearing the FIFO before restarting.
+
+I've added this to the plan: the explanation and table in §3.3, the new test, updated test counts (55 passed, 1 skipped on the host; 53 passed, 3 skipped in the image), and a new acceptance item.
+
+[STUDENT]
+You listed half-written files as the main risk but deferred the atomic-write fix. Now that the stages run in separate containers, how likely is this to happen in a normal run? How big is the fix? I'd like to decide whether it belongs in this plan or stays a documented follow-up.
+
+[AGENT]
+I'll measure this rather than guess. First, how long each write takes and how many system calls it uses, then a stress run of the unmodified I/O code to count real partial reads.
+
+A 20-row batch is written in one system call, so a reader can only catch an empty file; a 500-row batch takes 6 calls and can be read truncated. Next, a stress run of the original code with every stage polling 200× faster than the demo, restarting stages on crash and counting failures.
+
+The stress run found 1 failure in 6,461 batches: preprocess read an empty file and crashed. Everything else was clean. To turn that into a rate for a normal run, I need the actual exposure window, from the file appearing to its content landing.
+
+The window is about 0.25 ms: that's how long a new file is visible but still empty. Now I'll check the fix in the prototype and rerun the same stress test against it.
+
+Zero failures across 6,351 batches with the fix. Since failures are rare at 20 rows, I'll also try the case that corrupts silently instead of crashing: 500-row batches, where the original code can read a half-written file without any error.
+
+It's rare in a normal run, and when it does happen the stage crashes and restarts on its own rather than losing data. The fix is small: about 15 lines of helper code, 6 one-line changes to writes, and 3 tests. I recommend adding it to this plan as a separate last commit, but either choice is defensible.
+
+How likely it is. I measured it with the original code on the host:
+
+| Measurement | Result |
+|---|---|
+| Time a new file is visible but still empty | about 0.25 ms |
+| System calls to write a 20-row batch (1.8 KB) | 1, so a reader can only ever catch an empty file |
+| System calls to write a 500-row batch (44 KB) | 6, so a truncated read is possible in principle |
+| Stress run: 90 s, polling 200× faster than the demo, 20-row batches | 1 failure in 6,461 batches: preprocess read an empty file and crashed |
+| Stress run: 500-row batches, 2,510 batches | 0 truncated reads, 0 orders lost |
+
+With the demo's 2-second poll, readers look at the folders 200 times less often than in the stress run. So I'd expect this roughly once every tens to hundreds of hours of running. It is most likely early in a run, while the folders are still nearly empty. That's an estimate from a single stress run, not a precise rate.
+
+What happens when it does occur:
+- An empty file read by preprocess, train or infer: that stage crashes, `restart: on-failure` restarts it, and it redoes the work. Preprocess hadn't marked the file done, and infer retries the rows it hasn't scored yet. Nothing is lost.
+- Silent data loss: only possible with batches over about 90 rows, and never seen at 500.
+- The dashboard: shows an error for one 2-second refresh.
+
+Do containers make it more likely? Not really. The named volume behaves like a normal Linux disk, so the odds are the same as with `make run` today. Two things do change:
+- The graceful stop removes the other way half-written files appear: being force-killed in the middle of a write.
+- The restart policy hides the crashes. You'd only notice them in the restart count.
+
+It would matter more if you ran several copies of a stage, or bind-mounted a macOS folder into the containers. I didn't measure the second one.
+
+How big the fix is. I built it in the prototype to check:
+- The helper: a ~15-line context manager `atomic_path(final)` in `paths.py`. It writes to a hidden `.<name>.tmp` file in the same folder, then renames it into place in one step. The existing `orders_*.csv`-style patterns never match the hidden name, so readers can't see the file early.
+- Call sites: one-line changes at 6 writes — the raw batch, the features file, the checkpoint and its metrics, the train state file, and the predictions file. The quality log is left as is: it gets one short line appended, and only the dashboard reads it.
+- Tests: 3 new ones. They check that a file is invisible until it's complete, that a failed write publishes nothing, and that a full pipeline cycle leaves no temp files behind.
+- Makefile: `clean-data` also removes leftover `.*.tmp` files. These can only exist after a hard kill.
+- Results: with the fix, all 58 tests pass (1 skipped), and the same 90-second stress run had 0 failures in 6,351 batches.
+
+Why I'd include it: it's small, separate and already checked, it doesn't change what the pipeline does, and it closes the one failure the restart policy would otherwise quietly hide. Why you might defer it: it's rare and self-healing, and keeping this plan to containerization makes review simpler.
+
+Tell me which you prefer and I'll update `docs/plan.md`. If you include it, it becomes step 6 in the implementation order, with risk R1 closed and the test counts updated. If not, R1 gets these measurements and the ready-made follow-up design.
+
+[STUDENT]
+Include it as the last step. The fix is small and already verified, and
+the restart policy would otherwise hide these crashes, so a user would only
+see them in the restart count. Please update docs/plan.md. You haven't answered my first question yet: does the plan still contain full
+file contents the Builder would just copy? Please confirm what you changed.
+Also, did you check who owns /data when the named volume is first created?
+
+[AGENT]
+Both of those were answered in earlier turns. I'll re-check the current file so the confirmation is accurate, then add the atomic-write step.
+
+The only code left is the two interface contracts; everything else is smoke-test commands. Now I'll get the in-image test count with the atomic-write tests included.
+
+The counts are settled: 58 passed, 1 skipped on the host with Docker; 56 passed, 3 skipped inside the image; and 56 passed, 3 skipped without Docker. That last figure also corrects an earlier plan figure, since the Dockerfile text check doesn't need Docker. Now I'll update the plan.
+
+The plan now includes atomic writes as step 6, the last commit. To your two earlier questions, which I answered in previous replies: no, the plan no longer contains full file contents, and yes, I checked who owns `/data`.
+
+Full file contents. No; I removed them in the "Architect vs Builder" revision and re-checked the current file just now.
+- What I took out: the full Dockerfile, `.dockerignore`, `compose.yaml`, the Makefile block, and most of the `lifecycle.py` and `healthcheck.py` code.
+- What replaced them: a list of Dockerfile requirements, a per-service table for Compose, a target table for the Makefile, and behaviour rules for the code.
+- Code that remains: three short interface contracts the Builder must match — the `lifecycle.py` signatures (10 lines), the health-check command and its exit codes (2 lines), and the new `atomic_path()` signature (4 lines).
+- Everything else in code blocks is smoke-test commands, which are meant to be pasted.
+- Appendix: it says the prototype was only a feasibility check and is not a reference for the Builder.
+
+Who owns `/data` on first creation. Yes; I tested this and wrote it up as §3.5.
+- The rule: when the empty volume is first mounted, Docker copies the image's `/data` into it, owner included. So the Dockerfile decides.
+- What I tested: an app-owned `/data` in the image gives a writable volume. No `/data` in the image gives a root-owned volume and `PermissionError`. So does reusing an old volume that already holds root-owned files, because Docker only copies into an empty volume.
+- What the plan requires:
+  - A Dockerfile rule that `/data` exists and is owned by `app`.
+  - An in-image test (`test_image_data_dir.py`). I confirmed it fails on a root-owned `/data`.
+  - A smoke-test step that starts with `make docker-clean` so the volume is really new, then checks `stat` shows `app:app`.
+  - Risk R12 and two acceptance items.
+- Caveat: the prototype's base image already had `/data` app-owned, so it doesn't prove the Builder's Dockerfile gets this right. The in-image test and the fresh-volume smoke step are there for that.
+
+What changed for atomic writes:
+- New §3.6 has the measurements: 1 crash in 6,461 batches with the original code under the fast stress run, 0 in 6,351 with the fix. It also records your reason for including it — the restart policy would otherwise hide these crashes in the restart count.
+- §2.5 interface: the `atomic_path()` contract, the rule that the temp file is hidden and in the same folder, and the six call sites. The metrics file is written before its checkpoint. The quality log and the `.done_` markers are deliberately left alone.
+- Step 6 in the implementation order stands on its own, so it can be reviewed or reverted separately. Risk R1 now says it's fixed there, and "atomic writes" is gone from the non-goals and the not-adopted list.
+- Tests: 3 new ones, 26 new in total. Expected counts are now 58 passed, 1 skipped on the host; 56 passed, 3 skipped in the image; and 56 passed, 3 skipped without Docker. That last number corrects an earlier figure in the plan: the Dockerfile text check doesn't need Docker, so it still runs.
+- New acceptance item: no `.*.tmp` files are left in the volume after a run.
+
+===== TRANSCRIPT END =====

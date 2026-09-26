@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 
 from pipeline.config import Config, load_config
-from pipeline.paths import ensure_data_dirs, features_dir, quality_dir, raw_dir
+from pipeline.lifecycle import StopFlag, install_stop_handlers, run_forever
+from pipeline.paths import atomic_path, ensure_data_dirs, features_dir, quality_dir, raw_dir
 
 REQUIRED_COLUMNS = [
     "order_id",
@@ -147,7 +147,8 @@ def process_new_raw_files(base: Path | None = None) -> list[Path]:
         quality["batch_file"] = raw_path.name
         quality["processed_at"] = datetime.now(timezone.utc).isoformat()
         out_path = fdir / f"features_{raw_path.stem}.csv"
-        features.to_csv(out_path, index=False)
+        with atomic_path(out_path) as tmp:
+            features.to_csv(tmp, index=False)
         _append_quality_log(quality, base=base)
         marker.write_text(raw_path.name)
         written.append(out_path)
@@ -159,17 +160,24 @@ def process_new_raw_files(base: Path | None = None) -> list[Path]:
     return written
 
 
-def run_loop(cfg: Config | None = None, base: Path | None = None) -> None:
+def run_loop(
+    cfg: Config | None = None,
+    base: Path | None = None,
+    stop: StopFlag | None = None,
+) -> None:
     cfg = cfg or load_config()
     ensure_data_dirs(base)
     print("DashBite preprocess started")
-    while True:
-        process_new_raw_files(base=base)
-        time.sleep(cfg.poll_interval_seconds)
+    run_forever(
+        "preprocess",
+        lambda: process_new_raw_files(base=base),
+        cfg.poll_interval_seconds,
+        stop=stop,
+    )
 
 
 def main() -> None:
-    run_loop()
+    run_loop(stop=install_stop_handlers())
 
 
 if __name__ == "__main__":

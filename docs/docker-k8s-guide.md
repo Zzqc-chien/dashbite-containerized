@@ -321,10 +321,13 @@ That progression shows how the same DashBite stages move from a laptop demo to i
 
 ---
 
-## Implementation checklist (when you build it)
+## Implementation checklist
 
-1. Add `DATA_ROOT` support in `pipeline/paths.py`, config, and dashboard
-2. Add `Dockerfile` + `.dockerignore`
-3. Add `docker-compose.yml` (five services + shared volume)
-4. Document compose commands in the root README
-5. Later: add `k8s/` manifests and claim/shard helpers before HPA &gt; 1 on shared files
+1. ~~Add `DATA_ROOT` support in `pipeline/paths.py` and the dashboard~~ — done (read at call time in `data_root()`; not a `Config` field, so the frozen config test stays valid)
+2. ~~Add `Dockerfile` + `.dockerignore`~~ — done (non-root `app` user, data at `/data` rather than `/app/data`)
+3. ~~Add Compose (five services + shared volume)~~ — done as `compose.yaml`, plus a `tests` service in profile `test`, per-service health checks, `restart: on-failure`, a localhost-only dashboard port and a read-only dashboard mount
+4. ~~Document compose commands in the root README~~ — done ("Run with Docker"; driven by `make docker-*` targets)
+5. ~~Graceful SIGTERM, heartbeat health probes (`python -m pipeline.healthcheck <stage>`), atomic handoff writes~~ — done
+6. Later: add `k8s/` manifests (the Compose health checks map onto `exec` liveness probes) and claim/shard helpers before HPA &gt; 1 on shared files
+
+The examples in Part 1 above show the original sketch; `compose.yaml` and the `Dockerfile` in the repo root are the implemented versions.

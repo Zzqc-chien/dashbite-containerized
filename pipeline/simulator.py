@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,7 +10,8 @@ import numpy as np
 import pandas as pd
 
 from pipeline.config import Config, load_config
-from pipeline.paths import ensure_data_dirs, raw_dir
+from pipeline.lifecycle import StopFlag, install_stop_handlers, run_forever
+from pipeline.paths import atomic_path, ensure_data_dirs, raw_dir
 
 RAW_COLUMNS = [
     "order_id",
@@ -98,7 +98,8 @@ def write_batch(df: pd.DataFrame, dest_dir: Path, tick: int = 0) -> Path:
     dest_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
     path = dest_dir / f"orders_{stamp}_{tick:04d}.csv"
-    df.to_csv(path, index=False)
+    with atomic_path(path) as tmp:
+        df.to_csv(tmp, index=False)
     return path
 
 
@@ -117,20 +118,27 @@ def run_once(cfg: Config | None = None, base: Path | None = None, tick: int = 0)
     return path
 
 
-def run_loop(cfg: Config | None = None, base: Path | None = None) -> None:
-    """Continuously emit order batches (live-feeling feed)."""
+def run_loop(
+    cfg: Config | None = None,
+    base: Path | None = None,
+    stop: StopFlag | None = None,
+) -> None:
+    """Emit order batches (live-feeling feed) until ``stop`` is requested."""
     cfg = cfg or load_config()
     ensure_data_dirs(base)
     tick = 0
     print("DashBite order feed started")
-    while True:
+
+    def step() -> None:
+        nonlocal tick
         run_once(cfg=cfg, base=base, tick=tick)
         tick += 1
-        time.sleep(cfg.poll_interval_seconds)
+
+    run_forever("simulator", step, cfg.poll_interval_seconds, stop=stop)
 
 
 def main() -> None:
-    run_loop()
+    run_loop(stop=install_stop_handlers())
 
 
 if __name__ == "__main__":

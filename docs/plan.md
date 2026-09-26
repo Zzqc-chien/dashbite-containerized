@@ -591,7 +591,7 @@ docker compose exec preprocess python -c "import os; os.mkfifo('/data/raw/orders
 docker compose exec preprocess python -m pipeline.healthcheck preprocess   # a direct probe; exit 1 after >30 s
 make docker-ps                                                             # preprocess (unhealthy) after ~60 s
 docker compose exec preprocess rm /data/raw/orders_stuck.csv
-docker compose restart preprocess          # takes ~10 s: SIGTERM can't interrupt the blocked open(), so Docker SIGKILLs it
+docker compose restart preprocess          # ~1 s: SIGTERM interrupts open(), its retry hits the removed FIFO, preprocess exits (FileNotFoundError in the log)
 ```
 
 Remove the FIFO *before* restarting. Otherwise the restarted worker opens it again and hangs again.

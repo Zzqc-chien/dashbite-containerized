@@ -7,7 +7,6 @@ Does not import or call inference.
 from __future__ import annotations
 
 import json
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,7 +17,8 @@ from sklearn.metrics import accuracy_score
 from sklearn.model_selection import train_test_split
 
 from pipeline.config import Config, load_config
-from pipeline.paths import ensure_data_dirs, features_dir, models_dir
+from pipeline.lifecycle import StopFlag, install_stop_handlers, run_forever
+from pipeline.paths import atomic_path, ensure_data_dirs, features_dir, models_dir
 
 STATE_FILENAME = "train_state.json"
 FEATURE_COLUMNS = ["distance_km", "prep_minutes"]
@@ -37,7 +37,8 @@ def load_state(base: Path | None = None) -> dict:
 
 def save_state(state: dict, base: Path | None = None) -> None:
     ensure_data_dirs(base)
-    _state_path(base).write_text(json.dumps(state, indent=2))
+    with atomic_path(_state_path(base)) as tmp:
+        tmp.write_text(json.dumps(state, indent=2))
 
 
 def load_all_features(base: Path | None = None) -> pd.DataFrame:
@@ -105,12 +106,15 @@ def write_checkpoint(
     stamp = stamp or datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     ckpt_path = models_dir(base) / f"checkpoint_{stamp}.joblib"
     metrics_path = models_dir(base) / f"metrics_{stamp}.json"
-    joblib.dump(
-        {"model": model, "feature_columns": FEATURE_COLUMNS, "checkpoint_id": stamp},
-        ckpt_path,
-    )
+    # Metrics first, so a visible checkpoint always has its metrics.
     payload = {**metrics, "checkpoint_id": stamp, "feature_columns": FEATURE_COLUMNS}
-    metrics_path.write_text(json.dumps(payload, indent=2))
+    with atomic_path(metrics_path) as tmp:
+        tmp.write_text(json.dumps(payload, indent=2))
+    with atomic_path(ckpt_path) as tmp:
+        joblib.dump(
+            {"model": model, "feature_columns": FEATURE_COLUMNS, "checkpoint_id": stamp},
+            tmp,
+        )
     return ckpt_path
 
 
@@ -142,17 +146,24 @@ def maybe_train(cfg: Config | None = None, base: Path | None = None) -> Path | N
     return ckpt
 
 
-def run_loop(cfg: Config | None = None, base: Path | None = None) -> None:
+def run_loop(
+    cfg: Config | None = None,
+    base: Path | None = None,
+    stop: StopFlag | None = None,
+) -> None:
     cfg = cfg or load_config()
     ensure_data_dirs(base)
     print("DashBite training started (independent write path)")
-    while True:
-        maybe_train(cfg=cfg, base=base)
-        time.sleep(cfg.poll_interval_seconds)
+    run_forever(
+        "train",
+        lambda: maybe_train(cfg=cfg, base=base),
+        cfg.poll_interval_seconds,
+        stop=stop,
+    )
 
 
 def main() -> None:
-    run_loop()
+    run_loop(stop=install_stop_handlers())
 
 
 if __name__ == "__main__":

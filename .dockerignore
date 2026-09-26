@@ -1,0 +1,17 @@
+# Host-only and generated files stay out of the build context.
+.git
+.gitignore
+.dockerignore
+.venv/
+data/
+.logs/
+.streamlit/
+.pytest_cache/
+**/__pycache__/
+**/*.py[cod]
+.DS_Store
+*.joblib
+docs/
+Dockerfile
+compose.yaml
+Makefile
