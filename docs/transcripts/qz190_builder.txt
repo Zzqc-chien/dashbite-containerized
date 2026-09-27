@@ -1,7 +1,7 @@
 STUDENT_NAME: Qianchun Zhang
 NETID: qz190
 OPTION: 1
-ROLE: architect
+ROLE: builder
 AGENT_TOOL: Claude (claude.ai)
 REPOSITORY_B_URL: https://github.com/Zzqc-chien/dashbite-containerized
 ===== TRANSCRIPT START =====

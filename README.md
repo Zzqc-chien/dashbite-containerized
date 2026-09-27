@@ -6,6 +6,88 @@ Stages are separate Python modules that share folders under `data/`. Training an
 
 It runs as plain local processes, or as containers with Docker Compose (see [Run with Docker](#run-with-docker)).
 
+## Assignment: AI-assisted containerization (Option 1)
+
+**Option 1 — extend and containerize DashBite.** I started from the class demo
+*before* its Docker commit (`2c75df2`, 33 passing tests, no container files), so
+the Dockerfile, Compose setup and container-readiness changes in this repo came out
+of my own Architect → Builder → Tester workflow rather than the class files.
+
+**Purpose:** run the whole five-stage pipeline with one command, and make it behave
+correctly as containers: configurable storage, clean shutdown, meaningful health
+checks, and tests that run inside the image.
+
+| | Baseline (class demo) | This repo |
+|---|---|---|
+| Run | five terminals | `make docker-up` (one image, five services, one named volume) |
+| Data location | fixed `<project>/data` | `DATA_ROOT` env var; `/data` in containers |
+| `docker stop` a worker | ignores SIGTERM → 10 s wait, killed (exit 137) | **0.38 s, exit 0**, logs `<stage> stopped` |
+| Health | none | heartbeat probe for workers, `/_stcore/health` for the dashboard |
+| Handoff files | readers could see half-written files | atomic write (temp file + rename) |
+| Tests | 33, host only | 62 passed + 1 skipped on host; same suite in the image (`make docker-test`) |
+
+Plan: [docs/plan.md](docs/plan.md) · Transcripts: [docs/transcripts/](docs/transcripts/)
+
+### Manual smoke test (macOS, Apple M4, Docker Desktop, real `python:3.12-slim`)
+
+- `make docker-up` on a fresh volume: all five services `(healthy)` after ~6 s.
+- `/data` owned by `app:app` (uid 10001); the five data folders were created.
+- Logs showed orders → preprocessed → trained checkpoint → scored; corrupted batches kept 14/20 rows.
+- Dashboard health returned `ok`; Model Pulse showed 103 batches and 1,928 samples, updating every 2 s.
+- Host `data/raw` stayed empty; writing to the dashboard's mount failed with `Read-only file system`.
+- `docker compose stop simulator`: 0.38 s, `Exited (0)`, last log line `simulator stopped`.
+
+<p>
+  <img src="docs/images/smoke_healthy.png" width="48%" alt="All five services healthy">
+  <img src="docs/images/smoke_shutdown.png" width="48%" alt="Graceful shutdown in 0.38 s">
+</p>
+<img src="docs/images/smoke_dashboard.png" width="600" alt="Dashboard reading data from the volume">
+
+### How each AI role contributed
+
+- **Architect** inspected the code and wrote `docs/plan.md`. It found a real bug I had
+  not noticed: the dashboard hard-coded `PROJECT_ROOT` as its data location, so in a
+  container it would have shown an empty page. My follow-up questions added the
+  volume-ownership analysis (§3.5), the heartbeat threshold reasoning (§3.3) and the
+  atomic-write measurements (§3.6).
+- **Builder** implemented the six plan steps with 26 new tests and left the 33
+  original tests untouched. It could not pull `python:3.12-slim` in its sandbox, so I
+  verified the real image on my Mac and sent back three decisions.
+- **Tester** reviewed the work against the plan and found two important issues: a
+  preprocess backlog could delay shutdown past Docker's 10 s limit, and the tests
+  would not catch several regressions (for example, writes bypassing the atomic
+  rename). I chose which findings to fix.
+
+### Recommendations I accepted
+
+- **Atomic writes** (Architect). I asked how likely half-written files were; it
+  measured 1 crash in 6,461 batches at 200× the demo's poll rate. I included the fix
+  because `restart: on-failure` would otherwise hide these crashes as silent restarts.
+- **Per-file stop check in preprocess** (Tester), so a large backlog no longer blocks
+  shutdown or makes a busy worker look unhealthy.
+
+### Recommendations I changed or rejected
+
+- **Architect put complete working files in the plan.** I pushed back: the Architect
+  should design, not build. The plan was revised to keep interfaces and acceptance
+  criteria, and the Builder implemented from the design.
+- **`init: true` for the start-up window** (Tester). Rejected: the window is under
+  2 s, nothing has been written yet, and it would change the signal path the plan had
+  already measured.
+- **Silencing the pandas `UserWarning`** in preprocess logs. I kept it: the plan does
+  not change pipeline logic, and the warning is honest evidence of corrupted batches.
+- I also limited the Tester's test additions to the three most important gaps to keep
+  the final change small.
+
+### How I verified the result myself
+
+- Ran `make test` and `make docker-test` on my Mac after every stage. The Builder's
+  image was first proven here, on the real `python:3.12-slim`.
+- Checked `git diff --stat tests/` to confirm none of the 33 original tests changed.
+- Ran the manual smoke test above and timed shutdown myself.
+- After the Tester fixes, reran the tests and a short smoke check
+  (`make docker-clean`, `make docker-up`, `make docker-ps`, stop preprocess).
+
 ## Stages
 
 | Stage | Module | What it does |

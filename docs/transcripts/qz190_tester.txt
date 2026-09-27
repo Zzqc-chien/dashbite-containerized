@@ -1,0 +1,174 @@
+STUDENT_NAME: Qianchun Zhang
+NETID: qz190
+OPTION: 1
+ROLE: tester
+AGENT_TOOL: Claude (claude.ai)
+REPOSITORY_B_URL: https://github.com/Zzqc-chien/dashbite-containerized
+===== TRANSCRIPT START =====
+[STUDENT]
+Repository: https://github.com/Zzqc-chien/dashbite-containerized
+
+You are the Tester for this repository. Another agent implemented the
+changes, and you have no access to that conversation. Review the work
+independently, like a pull request you did not write.
+
+Please:
+1. Read docs/plan.md and compare the implementation against it. List
+   anything missing, incomplete, or different from the plan.
+2. Run or inspect the test suite. Point out weak tests and important
+   behavior that is not tested.
+3. Check typical and edge-case behavior, for example: what happens when the
+   data directory is empty or missing, when a worker receives SIGTERM in the
+   middle of a cycle, when the dashboard starts before any model exists, and
+   when the containers are restarted with an existing data volume.
+4. Verify that the README setup and run instructions are accurate and
+   complete.
+5. For every issue, give its severity (critical / important / minor), the
+   evidence, and a recommended fix. Do not weaken legitimate tests to make
+   them pass.
+
+Do not change any files yet. Give me the list of findings first, and I will
+decide which ones to fix.
+
+My own manual smoke test results (macOS, Apple M4, Docker Desktop,
+Compose v5.4.0, real python:3.12-slim image):
+- make test: 58 passed, 1 skipped
+- make docker-test: 56 passed, 3 skipped
+- make docker-up from a fresh volume: all five services (healthy) after ~6 s
+- /data owned by app:app 755 (uid 10001); five data folders created
+- Logs showed orders -> preprocessed -> trained checkpoint -> scored;
+  corrupted batches kept 14/20 rows (drop rate 30%)
+- Dashboard health endpoint returned ok; Model Pulse showed 103 batches,
+  1928 samples, drop rate 6.4%, and field-level failures, updating every 2 s
+- data/raw on the host stayed empty; writing to the dashboard mount failed
+  with "Read-only file system"
+- docker compose stop simulator: 0.38 s (baseline ~10 s), Exited (0),
+  last log line "simulator stopped"
+- Problems seen: none
+[AGENT]
+I found no critical issues. The implementation matches the plan: all 26 new tests are there, every file in §2 exists, and the compose settings match. The suite passes on the host: 58 passed, 1 skipped. My edge-case runs turned up two important issues and several minor ones. I changed no repository files.
+
+One limit on what I could check: Docker Hub is blocked from my sandbox, so I couldn't build the image on python:3.12-slim. For the in-image behaviour I'm relying on your smoke test. Everything else I ran on the host with the container's settings (DATA_ROOT, HEARTBEAT_DIR), and for one check I ran a worker as PID 1 in its own namespace, which is how it runs in a container.
+
+What works (verified)
+
+- Empty or missing data directory: the dashboard renders both pages with no exceptions, whether DATA_ROOT is empty or doesn't exist. The workers create the folders they need.
+- Dashboard before any model: no errors; "No predictions yet" and "Orders at risk" shows $0.00. One small pre-existing oddity: "Mean late probability" shows 0.000 instead of being hidden.
+- Restart with existing data: after stopping all four workers and restarting on the same data, nothing was processed twice, no extra checkpoint was trained, and no order was scored twice. Work that was still pending got caught up, and no .tmp files were left.
+- SIGTERM between cycles: exit 0 in 0.5 s, with the "<stage> stopped" line, on all four workers.
+
+Important
+
+1. Stopping takes as long as the backlog when preprocess has catching up to do.
+- Evidence: preprocess handles every unprocessed raw file in a single loop iteration and only checks the stop flag afterwards. With 300 pending files, SIGTERM took 2.9 s. With 4,000 files it was still running at 10 s, which is exactly where Docker would SIGKILL it (exit 137).
+- Health side effect: the heartbeat is also only written once the whole backlog is done. At about 50 files/s, a backlog of more than roughly 1,500 files would mark a busy, healthy worker unhealthy.
+- When it happens: when preprocess restarts after being down while the simulator kept running. That is one of the restart scenarios you asked about. This breaks R3 and R4.
+- Fix: give process_new_raw_files an optional stop check (and a heartbeat) per file, or cap how many files one iteration handles (say 50). Either way the existing call signature stays valid.
+
+2. The tests don't catch several regressions the plan cares about.
+I made each of these changes on a scratch copy and re-ran the suite. Every time the result was still 58 passed:
+- All handoff writes go back to writing the final file directly: test_no_temp_leftovers checks that no temp files are left over, which is also true if temp files are never used.
+- preprocess, train and infer main() no longer install signal handlers: only the simulator gets a real-signal test.
+- Dashboard probe goes through proxy settings: proxy bypass is untested.
+- Checkpoint written before its metrics: order untested.
+- The 30 s floor in the heartbeat limit removed: only the 60 s poll case is tested.
+- restart: on-failure removed from compose: the compose test doesn't check the restart policy.
+Fix:
+- Spy on os.replace, or check that the final file only appears through a rename.
+- Parametrize the SIGTERM subprocess test over all four workers.
+- Probe the dashboard with a bogus HTTP_PROXY set, and expect exit 0.
+- Assert the limit is 30 at POLL_INTERVAL_SECONDS=2.
+- Assert the metrics file exists by the time the checkpoint appears.
+- Extend the compose test to check restart, the project name, the absence of depends_on and container_name, each worker's command, and the knob interpolation.
+
+Minor
+
+3. A SIGTERM during start-up is lost.
+- Evidence: a worker running as PID 1 that received SIGTERM 0.3 s after starting was still running 10 s later. After start-up, the same signal stopped it in 0.5 s. The handlers are only installed once pandas and scikit-learn have been imported, which takes 0.6 s (simulator) to 1.7 s (train).
+- Impact: docker-up followed immediately by docker-down waits the full 10 s.
+- Fix: init: true in the x-pipeline anchor. Python is then no longer PID 1, so a signal during imports kills it straight away, and nothing has been written yet at that point.
+
+4. An old heartbeat reports a stopped or restarting worker as healthy.
+- Evidence: after train stopped, the probe still returned exit 0 ("heartbeat 0.6s old").
+- Impact: /tmp survives docker compose restart, stop/start, and on-failure restarts. For up to 30 s, the new process looks healthy before it has done any work.
+- Fix: delete the stage's heartbeat file when run_forever starts.
+
+5. clean-data doesn't treat a blank DATA_ROOT as unset.
+- Evidence: DATA_ROOT= make -n clean-data expands to rm -f ""/raw/*.csv ..., which means paths at the filesystem root. The Python code treats a blank value as unset.
+- Fix: DATA_ROOT := $(or $(strip $(DATA_ROOT)),$(CURDIR)/data).
+
+6. A bad HEARTBEAT_MAX_AGE_SECONDS crashes the probe.
+- Evidence: 30s gives a ValueError traceback and exit 1.
+- Fix: catch the error and print one clear line, ideally with exit 2.
+
+7. Two tests prove less than they claim.
+- test_no_heartbeat_when_dir_unset asserts tmp_path is empty. Nothing could ever write there, so it always passes.
+- The SIGTERM test sends the signal while the loop is almost certainly asleep, so it never shows that an iteration already in progress finishes first. A step that blocks on an event would test that deterministically.
+- Also missing: SIGINT, and the dashboard loaders on a data directory that doesn't exist.
+
+8. README gaps.
+- The manual streamlit run pipeline/dashboard/app.py fails with ModuleNotFoundError: No module named 'pipeline' because PYTHONPATH isn't set. This is pre-existing; the Makefile and image set it.
+- The config table lists defaults of 2000/50, but make and Docker actually use 50/20, and the table doesn't say so.
+- It says "Compose v2", while your version reports v5.4.0. "The docker compose plugin" would be clearer.
+- "No local Python needed" is true, but make is still required.
+- In docs/plan.md, the review note sits between the metadata table's header and its rows, so the table no longer renders.
+
+9. The dashboard relies on a Streamlit option that is being removed.
+- Evidence: app.py uses use_container_width, which prints a notice that it goes away after 2025-12-31. requirements.txt has no upper bound, so a future rebuild could break the page.
+- Why tests miss it: make docker-test never renders app.py.
+- Fix: switch to width="stretch", or cap the Streamlit version.
+
+If you choose some of these, I'd start with 1 and 2, then 3 and 4, since each of those is a small, self-contained change.
+[STUDENT]
+Thanks. My decisions:
+
+Fix:
+1. Preprocess backlog: check the stop flag and write the heartbeat per file
+   in process_new_raw_files, keeping the existing call signature valid.
+2. Tests, only these three: prove handoff writes go through os.replace;
+   parametrize the real SIGTERM test over all four workers; extend the
+   compose test to check restart: on-failure.
+4. Delete the stage's heartbeat file when run_forever starts.
+5. Make clean-data treat a blank DATA_ROOT as unset.
+8. README: the PYTHONPATH note for the manual streamlit command, the 50/20
+   Makefile and Docker defaults in the config table, "the docker compose
+   plugin" instead of "Compose v2", and that make is still required.
+   I will fix the plan.md table myself.
+9. Replace use_container_width with width="stretch".
+
+Do not fix:
+3. The start-up window is under 2 s and nothing has been written yet.
+   Adding init: true would change the signal path the plan measured.
+6. It only happens when a user sets an invalid value by hand, and the
+   error already shows the cause.
+7. Item 2 already covers the most important test gaps; I want to keep this
+   round small.
+
+Please make these changes, run the full test suite, and give me one zip
+with only the files you changed.
+[AGENT]
+All the changes you picked are in the zip (eight files). I haven't committed anything.
+
+Files changed: Makefile, README.md, pipeline/dashboard/app.py, pipeline/lifecycle.py, pipeline/preprocess.py, tests/integration/test_container_config.py, tests/integration/test_no_temp_leftovers.py, tests/integration/test_worker_lifecycle.py.
+
+Test results:
+- Host with the Docker CLI (make test): before 58 passed, 1 skipped; now 62 passed, 1 skipped.
+- Host without Docker: before 56 passed, 3 skipped; now 60 passed, 3 skipped.
+- Inside the image (make docker-test): before 56 passed, 3 skipped; now 60 passed, 3 skipped expected.
+I still can't build the image here, so the in-image count is worked out from the skip rules, not run. Your next make docker-test will confirm it. The counts in plan.md §5 and §8 are now out of date too, which you may want to update when you fix its table.
+
+The three new tests catch what they're meant to. I re-applied each regression from my review on a scratch copy:
+- Handoff writes bypassing atomic_path: 1 test fails.
+- Signal handlers removed from preprocess, train and infer: 3 tests fail.
+- restart: on-failure removed: 1 test fails.
+
+Rechecks of the fixes:
+- Backlog stop: with 4,000 pending files, preprocess now stops in 0.1 s with exit 0. Before, it was still running at the 10 s kill. After restarting, it finished the rest with no batch counted twice.
+- clean-data: a blank or all-space DATA_ROOT, set in the environment or on the command line, now falls back to the repo's data/. A real value is still used. When DATA_ROOT isn't set, it still isn't exported to other targets.
+- Dashboard: renders with no exceptions on empty data, before any model exists, and with predictions present. The deprecation warning is gone.
+
+Three things you should know:
+- A short stale-heartbeat window remains. The old heartbeat is deleted when run_forever starts, as you specified, but that happens after the imports. In my run, train wrote its first new heartbeat 1.5 s after restarting, and until then the old file was still there. That window used to be up to 30 s.
+- The Streamlit fix raises the minimum version. width="stretch" needs Streamlit 1.49 or newer; I checked 1.48 and 1.49. requirements.txt still says >=1.28.0, which is now wrong for older installs, although today every fresh install gets 1.64. I didn't change it because you didn't approve dependency changes. Bumping it to streamlit>=1.49 is a one-line fix if you want it.
+- One README line you didn't list. Since preprocess now also writes a heartbeat after each file, I added a few words about that to the "Health checks" bullet, so the README stays accurate.
+===== TRANSCRIPT END =====
