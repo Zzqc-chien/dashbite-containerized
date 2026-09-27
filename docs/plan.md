@@ -1,11 +1,8 @@
 # Plan: Containerize DashBite
 
+ \> Reviewed by Qianchun Zhang: I chose to include the atomic-write fix \> because the restart policy would otherwise hide these crashes.
 | | |
 |---|---|
-
-> Reviewed by Qianchun Zhang: I chose to include the atomic-write fix
-> because the restart policy would otherwise hide these crashes.
-
 | **Role** | Architect (design only — no code in this change) |
 | **Baseline** | `2c75df2` "Import DashBite baseline from class demo" — 33 tests green via `make test` |
 | **Goal** | Run the whole pipeline with Docker Compose, and make it container-ready beyond a basic Dockerfile |
