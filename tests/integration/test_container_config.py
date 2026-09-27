@@ -63,6 +63,8 @@ def test_pipeline_services_share_volume_env_and_health(compose_config):
         mount = _data_mount(service)
         assert mount["type"] == "volume" and mount["source"] == "dashbite-data", name
         assert name in service["healthcheck"]["test"], name
+        # Crashes restart the stage; a clean stop (exit 0 on SIGTERM) does not.
+        assert service.get("restart") == "on-failure", name
     assert "dashbite-data" in compose_config["volumes"]
 
 

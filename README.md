@@ -106,15 +106,15 @@ Terminal 4 — infer (read path only; picks newest checkpoint):
 python -m pipeline.infer
 ```
 
-Terminal 5 — dashboards:
+Terminal 5 — dashboards (Streamlit only adds the script's own folder to the import path, so point `PYTHONPATH` at the repo root or `import pipeline` fails; `make dashboard` does this for you):
 
 ```bash
-streamlit run pipeline/dashboard/app.py
+PYTHONPATH=. streamlit run pipeline/dashboard/app.py
 ```
 
 ## Run with Docker
 
-Needs Docker Desktop (macOS) or Docker Engine (Linux) with Compose v2 (`docker compose`). No local Python or `make install` is needed.
+Needs Docker Desktop (macOS) or Docker Engine (Linux) with the `docker compose` plugin, plus `make`. No local Python or `make install` is needed.
 
 One image (`dashbite:local`) runs every stage; each Compose service overrides the command. All five services share the named volume `dashbite_dashbite-data`, mounted at `/data` (the dashboard mounts it read-only).
 
@@ -133,7 +133,7 @@ How it behaves:
 
 - **Data lives in the volume, not in `./data`.** Host runs (`make run`) and containers never share files. `make stop` any host pipeline first, or the port clashes.
 - **Stopping is graceful.** Workers finish their current iteration on SIGTERM and exit 0 (`<stage> stopped` in the log), so `make docker-down` takes about a second. Crashes restart the stage (`restart: on-failure`); a clean stop does not.
-- **Health checks** run `python -m pipeline.healthcheck <stage>`. Workers touch a heartbeat file after every loop iteration and report unhealthy when it is older than `HEARTBEAT_MAX_AGE_SECONDS`; the dashboard is probed at `/_stcore/health`. This is liveness, not progress, and plain Compose only *reports* unhealthy containers; it does not restart them (Kubernetes liveness probes would).
+- **Health checks** run `python -m pipeline.healthcheck <stage>`. Workers touch a heartbeat file after every loop iteration (preprocess also after each file it catches up on) and report unhealthy when it is older than `HEARTBEAT_MAX_AGE_SECONDS`; the dashboard is probed at `/_stcore/health`. This is liveness, not progress, and plain Compose only *reports* unhealthy containers; it does not restart them (Kubernetes liveness probes would).
 - **Runs as a non-root user** (`app`, uid 10001). A fresh volume inherits `/data` ownership from the image. If workers crash-loop with `PermissionError: ... '/data/raw'`, the volume was created by a broken build: run `make docker-clean`, then `make docker-up`. For a bind mount on Linux instead of the named volume, `chown 10001` the host directory or set `user:` in `compose.yaml`.
 - **Keep one replica per service.** File markers are not multi-writer safe; see [docs/docker-k8s-guide.md](docs/docker-k8s-guide.md).
 - Long sessions slow down because stages re-read every CSV on each poll; `make docker-clean` between sessions.
@@ -142,8 +142,8 @@ How it behaves:
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `TRAIN_EVERY_N_EVENTS` | `2000` | Retrain after this many **new** labeled rows |
-| `BATCH_SIZE` | `50` | Orders per simulator tick |
+| `TRAIN_EVERY_N_EVENTS` | `2000` (`make` and Docker: `50`) | Retrain after this many **new** labeled rows |
+| `BATCH_SIZE` | `50` (`make` and Docker: `20`) | Orders per simulator tick |
 | `POLL_INTERVAL_SECONDS` | `2.0` | Sleep between polls/ticks |
 | `RANDOM_SEED` | `42` | Training seed |
 | `CORRUPT_BATCH_RATE` | `0.25` | Fraction of batches that include NaNs / bad types |
@@ -151,6 +151,8 @@ How it behaves:
 | `HEARTBEAT_DIR` | unset, so no heartbeat (image: `/tmp/dashbite`) | Where workers touch `<stage>.heartbeat` after each loop iteration |
 | `HEARTBEAT_MAX_AGE_SECONDS` | `max(30, 3 × POLL_INTERVAL_SECONDS)` | Staleness limit for the worker health probe |
 | `DASHBOARD_HEALTH_URL` | `http://127.0.0.1:8501/_stcore/health` | Dashboard health probe target |
+
+The first default in each row is the code's own (plain `python -m pipeline.<stage>`). The Makefile exports demo-friendly values for the two knobs marked above, and `compose.yaml` falls back to the same values, so `make run`, `make docker-up` and a plain `docker compose up` all start with a threshold of 50 and batches of 20.
 
 Code that passes an explicit `base` (as the tests do) still gets `base/data`; otherwise `DATA_ROOT` wins over the default.
 

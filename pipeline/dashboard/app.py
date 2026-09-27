@@ -69,7 +69,7 @@ def main() -> None:
                 {"field": list(failures.keys()), "failures": list(failures.values())}
             ).set_index("field")
             st.bar_chart(fail_df)
-            st.dataframe(fail_df, use_container_width=True)
+            st.dataframe(fail_df, width="stretch")
         else:
             st.info("No quality log yet — waiting for preprocess.")
 
@@ -96,7 +96,7 @@ def main() -> None:
         st.metric("Throughput (rows kept)", throughput["rows_out"])
         if not predictions.empty:
             st.subheader("Recent predictions")
-            st.dataframe(predictions.tail(50), use_container_width=True)
+            st.dataframe(predictions.tail(50), width="stretch")
         else:
             st.info("No predictions yet.")
 

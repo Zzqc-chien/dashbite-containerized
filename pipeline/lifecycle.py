@@ -87,10 +87,17 @@ def run_forever(
 ) -> None:
     """Repeat *step -> beat -> sleep* until ``stop`` is requested.
 
+    Any heartbeat left by an earlier process is deleted first: ``/tmp``
+    survives a container restart, and an old file would make the new process
+    look healthy before it has finished a single iteration.
+
     Exceptions from ``step`` are not caught: a crash should end the process
     so the container's restart policy can handle it.
     """
     stop = stop or StopFlag()
+    stale = heartbeat_path(stage)
+    if stale is not None:
+        stale.unlink(missing_ok=True)
     while not stop.requested:
         step()
         beat(stage)

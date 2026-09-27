@@ -39,7 +39,13 @@ def test_run_loop_stops_and_beats(stage, monkeypatch, tmp_path):
 
 
 @pytest.mark.integration
-def test_simulator_exits_cleanly_on_sigterm(tmp_path):
+@pytest.mark.parametrize("stage", ["simulator", "preprocess", "train", "infer"])
+def test_worker_exits_cleanly_on_sigterm(stage, tmp_path):
+    """A real SIGTERM to ``python -m pipeline.<stage>`` ends in exit 0.
+
+    Fails if a stage's ``main()`` stops installing the handlers: Python's
+    default SIGTERM action would end the process with -15 and no log line.
+    """
     data = tmp_path / "data"
     hb = tmp_path / "hb"
     env = {
@@ -51,7 +57,7 @@ def test_simulator_exits_cleanly_on_sigterm(tmp_path):
         "PYTHONUNBUFFERED": "1",
     }
     proc = subprocess.Popen(
-        [sys.executable, "-m", "pipeline.simulator"],
+        [sys.executable, "-m", f"pipeline.{stage}"],
         cwd=PROJECT_ROOT,
         env=env,
         stdout=subprocess.PIPE,
@@ -60,10 +66,10 @@ def test_simulator_exits_cleanly_on_sigterm(tmp_path):
     )
     output = ""
     try:
-        heartbeat = hb / "simulator.heartbeat"
+        heartbeat = hb / f"{stage}.heartbeat"
         deadline = time.monotonic() + 20
         while not heartbeat.exists() and time.monotonic() < deadline:
-            assert proc.poll() is None, "simulator exited before its first heartbeat"
+            assert proc.poll() is None, f"{stage} exited before its first heartbeat"
             time.sleep(0.1)
         assert heartbeat.exists(), "no heartbeat within 20 s"
 
@@ -76,5 +82,6 @@ def test_simulator_exits_cleanly_on_sigterm(tmp_path):
             output += extra or ""
 
     assert proc.returncode == 0, output
-    assert "simulator stopped" in output, output
-    assert list((data / "raw").glob("orders_*.csv")), output
+    assert f"{stage} stopped" in output, output
+    if stage == "simulator":
+        assert list((data / "raw").glob("orders_*.csv")), output

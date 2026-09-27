@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 
 from pipeline.config import Config, load_config
-from pipeline.lifecycle import StopFlag, install_stop_handlers, run_forever
+from pipeline.lifecycle import StopFlag, beat, install_stop_handlers, run_forever
 from pipeline.paths import atomic_path, ensure_data_dirs, features_dir, quality_dir, raw_dir
 
 REQUIRED_COLUMNS = [
@@ -131,14 +131,26 @@ def _append_quality_log(record: dict, base: Path | None = None) -> Path:
     return path
 
 
-def process_new_raw_files(base: Path | None = None) -> list[Path]:
-    """Convert unprocessed raw CSVs into feature CSVs; log quality per batch."""
+def process_new_raw_files(
+    base: Path | None = None,
+    stop: StopFlag | None = None,
+) -> list[Path]:
+    """Convert unprocessed raw CSVs into feature CSVs; log quality per batch.
+
+    A large backlog is handled one file at a time: the heartbeat is touched
+    after every file (a no-op unless ``HEARTBEAT_DIR`` is set), and with
+    ``stop`` the loop ends before the next file once a stop is requested.
+    The remaining files are picked up on the next start. So a long catch-up
+    neither delays shutdown nor looks like a hang to the health probe.
+    """
     ensure_data_dirs(base)
     rdir = raw_dir(base)
     fdir = features_dir(base)
     written: list[Path] = []
 
     for raw_path in sorted(rdir.glob("orders_*.csv")):
+        if stop is not None and stop.requested:
+            break
         marker = _processed_marker(raw_path, fdir)
         if marker.exists():
             continue
@@ -152,6 +164,7 @@ def process_new_raw_files(base: Path | None = None) -> list[Path]:
         _append_quality_log(quality, base=base)
         marker.write_text(raw_path.name)
         written.append(out_path)
+        beat("preprocess")
         print(
             f"preprocessed {raw_path.name} -> {out_path.name} "
             f"({quality['rows_out']}/{quality['rows_in']} rows kept, "
@@ -168,9 +181,10 @@ def run_loop(
     cfg = cfg or load_config()
     ensure_data_dirs(base)
     print("DashBite preprocess started")
+    stop = stop or StopFlag()
     run_forever(
         "preprocess",
-        lambda: process_new_raw_files(base=base),
+        lambda: process_new_raw_files(base=base, stop=stop),
         cfg.poll_interval_seconds,
         stop=stop,
     )

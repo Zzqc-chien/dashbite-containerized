@@ -19,10 +19,12 @@ export PYTHONPATH              := $(CURDIR)
 export PYTHONUNBUFFERED        := 1
 
 # Host data directory used by clean-data (deliberately not exported).
+# A blank value counts as unset, as in pipeline/paths.py; 'override' makes that
+# hold for 'make clean-data DATA_ROOT=' on the command line too.
 # Keep comments on their own lines: Make keeps spaces before a trailing '#'.
-DATA_ROOT ?= $(CURDIR)/data
+override DATA_ROOT := $(or $(strip $(DATA_ROOT)),$(CURDIR)/data)
 
-# Container runtime (Compose v2)
+# Container runtime (the docker compose plugin)
 COMPOSE ?= docker compose
 
 LOG_DIR := .logs
